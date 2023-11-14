@@ -8,11 +8,76 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
+
+	"golang.org/x/time/rate"
 )
 
-func blocked(ip string) bool {
-	// get the blocked ips
-	return false
+var limiter = NewIPRateLimiter(1, 1)
+
+// https://medium.com/@pliutau/rate-limiting-http-requests-in-go-based-on-ip-address-4e66d1bea4cf
+// From there, thanks for now!
+type IPRateLimiter struct {
+	ips map[string]*rate.Limiter
+	mu  *sync.RWMutex
+	r   rate.Limit
+	b   int
+}
+
+// NewIPRateLimiter .
+func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
+	i := &IPRateLimiter{
+		ips: make(map[string]*rate.Limiter),
+		mu:  &sync.RWMutex{},
+		r:   r,
+		b:   b,
+	}
+
+	return i
+}
+
+// AddIP creates a new rate limiter and adds it to the ips map,
+// using the IP address as the key
+func (i *IPRateLimiter) AddIP(ip string) *rate.Limiter {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	limiter := rate.NewLimiter(i.r, i.b)
+
+	i.ips[ip] = limiter
+
+	return limiter
+}
+
+// GetLimiter returns the rate limiter for the provided IP address if it exists.
+// Otherwise calls AddIP to add IP address to the map
+func (i *IPRateLimiter) GetLimiter(r *http.Request) *rate.Limiter {
+
+	ip := RequestIP(r)
+
+	i.mu.Lock()
+	limiter, exists := i.ips[ip]
+
+	if !exists {
+		i.mu.Unlock()
+		return i.AddIP(ip)
+	}
+
+	i.mu.Unlock()
+
+	return limiter
+}
+
+func RequestIP(r *http.Request) string {
+	if proxyHost := r.Header.Get("CF-Connecting-IP"); proxyHost != "" {
+		return proxyHost
+	}
+
+	if proxyHost := r.Header.Get("X-Forwarded-For"); proxyHost != "" {
+		return proxyHost
+	}
+
+	return r.RemoteAddr
 }
 
 func Hijack(w http.ResponseWriter) {
@@ -74,23 +139,43 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 
 	buff, _ := ioutil.ReadAll(resp.Body)
 
-	if blocked(r.RemoteAddr) {
-		Hijack(w) // !!!
-		return
-	}
+	// if blocked(r) {
+	// 	Hijack(w) // !!!
+	// 	return
+	// }
 
 	w.Write(buff)
 	return
 }
 
+func LimiterMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limiter := limiter.GetLimiter(r)
+		if !limiter.Allow() {
+			// http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			Hijack(w)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	fmt.Print("Starting....")
 
-	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		proxy(w, r)
-	})
+	mux := http.NewServeMux()
 
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	mux.HandleFunc("/", proxy)
+
+	// http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+	// 	proxy(w, r)
+	// })
+
+	if err := http.ListenAndServe(":8888", LimiterMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
+
+	// if err := http.ListenAndServe(":8080", nil); err != nil {
+	// }
 }
