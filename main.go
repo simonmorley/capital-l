@@ -109,7 +109,9 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		proxy = "http://127.0.0.1:8081"
 	}
 
+	proxy = fmt.Sprintf("%s%s", proxy, r.URL.Path)
 	target, err := url.Parse(proxy)
+
 	if err != nil {
 		http.Error(w, "Error parsing target URL", http.StatusInternalServerError)
 		return
@@ -172,7 +174,7 @@ func main() {
 	// 	proxy(w, r)
 	// })
 
-	if err := http.ListenAndServe(":8888", LimiterMiddleware(mux)); err != nil {
+	if err := http.ListenAndServe(":8080", LimiterMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
 
